@@ -1,0 +1,171 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  GODOT_VERSION: "4.3"
+  PROJECT_NAME: PurpleHeart
+
+permissions:
+  contents: write
+
+jobs:
+  export-android:
+    name: Exportar APK (debug)
+    runs-on: ubuntu-latest
+    container:
+      image: barichello/godot-ci:4.3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Localizar el proyecto Godot (descomprime el zip si hace falta)
+        run: |
+          P=$(find . -maxdepth 3 -name project.godot -not -path "*/.godot/*" | head -n 1)
+          if [ -z "$P" ]; then
+            Z=$(find . -maxdepth 2 -name "*.zip" -not -path "./.git/*" | head -n 1)
+            if [ -n "$Z" ]; then
+              echo "No hay project.godot suelto. Descomprimiendo: $Z"
+              mkdir -p _proyecto
+              unzip -q -o "$Z" -d _proyecto || python3 -m zipfile -e "$Z" _proyecto
+              P=$(find . -maxdepth 4 -name project.godot -not -path "*/.godot/*" | head -n 1)
+            fi
+          fi
+          if [ -z "$P" ]; then
+            echo "::error::No se encontro project.godot ni un zip con el proyecto. Archivos en la raiz:"
+            ls -la
+            exit 1
+          fi
+          D=$(dirname "$P")
+          echo "Proyecto encontrado en: $D"
+          ls -la "$D"
+          echo "PROJECT_DIR=$D" >> "$GITHUB_ENV"
+
+      - name: Instalar plantillas y configurar Android
+        run: |
+          cd "$PROJECT_DIR"
+          mkdir -p ~/.local/share/godot/export_templates ~/.config/godot
+          cp -r /root/.local/share/godot/export_templates/${GODOT_VERSION}.stable ~/.local/share/godot/export_templates/ || true
+          keytool -keyalg RSA -genkeypair -alias androiddebugkey -keypass android \
+            -keystore ~/debug.keystore -storepass android \
+            -dname "CN=Android Debug,O=Android,C=US" -validity 9999 -deststoretype pkcs12
+          JAVA_BIN=$(readlink -f "$(which java)")
+          JAVA_HOME_DIR=$(dirname "$(dirname "$JAVA_BIN")")
+          for f in editor_settings-4.tres editor_settings-4.3.tres; do
+            {
+              echo '[gd_resource type="EditorSettings" format=3]'
+              echo ''
+              echo '[resource]'
+              echo 'export/android/android_sdk_path = "/usr/lib/android-sdk"'
+              echo "export/android/java_sdk_path = \"$JAVA_HOME_DIR\""
+              echo "export/android/debug_keystore = \"$HOME/debug.keystore\""
+              echo 'export/android/debug_keystore_user = "androiddebugkey"'
+              echo 'export/android/debug_keystore_pass = "android"'
+              echo 'export/android/force_system_user = false'
+              echo 'export/android/shutdown_adb_on_exit = true'
+            } > ~/.config/godot/$f
+          done
+
+      - name: Asegurar export_presets.cfg
+        run: |
+          cd "$PROJECT_DIR"
+          if [ -f export_presets.cfg ] && grep -q 'name="Android"' export_presets.cfg; then
+            echo "export_presets.cfg ya existe con preset Android."
+          else
+            echo "Creando export_presets.cfg con preset Android."
+            cat > export_presets.cfg <<'PRESET'
+          [preset.0]
+
+          name="Android"
+          platform="Android"
+          runnable=true
+          advanced_options=false
+          dedicated_server=false
+          custom_features=""
+          export_filter="all_resources"
+          include_filter=""
+          exclude_filter="tools/*, .github/*, *.md"
+          export_path="build/android/PurpleHeart.apk"
+          encryption_include_filters=""
+          encryption_exclude_filters=""
+          encrypt_pck=false
+          encrypt_directory=false
+
+          [preset.0.options]
+
+          custom_template/debug=""
+          custom_template/release=""
+          gradle_build/use_gradle_build=false
+          gradle_build/export_format=0
+          gradle_build/min_sdk=""
+          gradle_build/target_sdk=""
+          architectures/armeabi-v7a=false
+          architectures/arm64-v8a=true
+          architectures/x86=false
+          architectures/x86_64=false
+          version/code=1
+          version/name="0.1.0"
+          package/unique_name="com.purpleheart.game"
+          package/name="Corazon Purpura"
+          package/signed=true
+          package/app_category=2
+          package/retain_data_on_uninstall=false
+          package/exclude_from_recents=false
+          launcher_icons/main_192x192=""
+          launcher_icons/adaptive_foreground_432x432=""
+          launcher_icons/adaptive_background_432x432=""
+          graphics/opengl_debug=false
+          xr_features/xr_mode=0
+          screen/immersive_mode=true
+          screen/support_small=true
+          screen/support_normal=true
+          screen/support_large=true
+          screen/support_xlarge=true
+          user_data_backup/allow=false
+          command_line/extra_args=""
+          apk_expansion/enable=false
+          permissions/internet=true
+          permissions/access_network_state=true
+          permissions/access_wifi_state=true
+          permissions/change_wifi_multicast_state=true
+          permissions/change_wifi_state=true
+          permissions/vibrate=true
+          PRESET
+          fi
+
+      - name: Importar recursos del proyecto
+        run: |
+          cd "$PROJECT_DIR"
+          mkdir -p .godot/editor .godot/imported
+          chmod -R u+rwX .godot || true
+          godot --headless --verbose --import || true
+
+      - name: Exportar APK
+        run: |
+          cd "$PROJECT_DIR"
+          OUT="$GITHUB_WORKSPACE/build/android"
+          mkdir -p "$OUT"
+          godot --headless --verbose --export-debug "Android" "$OUT/${PROJECT_NAME}.apk" || true
+          ls -lh "$OUT"
+          if [ ! -s "$OUT/${PROJECT_NAME}.apk" ]; then
+            echo "::error::Godot no genero el APK. Revisa los errores de arriba."
+            exit 1
+          fi
+
+      - name: Subir APK como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: PurpleHeart-android-apk
+          path: build/android/*.apk
+          if-no-files-found: error
+
+      - name: Publicar Release (solo al subir un tag vX.Y)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/android/*.apk
