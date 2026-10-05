@@ -103,6 +103,19 @@ jobs:
             } > ~/.config/godot/$f
           done
 
+      - name: Asegurar ajustes del proyecto para Android
+        run: |
+          cd "$PROJECT_DIR"
+          grep -q '^config_version=' project.godot || sed -i '1i config_version=5\n' project.godot
+          if ! grep -q 'import_etc2_astc' project.godot; then
+            if grep -q '^\[rendering\]' project.godot; then
+              sed -i '/^\[rendering\]/a textures/vram_compression/import_etc2_astc=true' project.godot
+            else
+              printf '\n[rendering]\ntextures/vram_compression/import_etc2_astc=true\n' >> project.godot
+            fi
+          fi
+          head -40 project.godot
+
       - name: Asegurar export_presets.cfg
         run: |
           cd "$PROJECT_DIR"
